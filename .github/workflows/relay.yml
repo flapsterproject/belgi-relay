@@ -1,0 +1,126 @@
+name: relay
+
+# PUBLIC REPO. Everything here - the workflow, every log line, every artifact -
+# is readable by anyone. So no figure from the account may ever be printed or
+# stored in the clear.
+#
+#   * logs say only whether a step succeeded, never a number
+#   * the result is encrypted with a shared key before it becomes an artifact
+#   * the token stays a repository secret and is never echoed
+#
+# The caller decrypts with the same key. If the key is ever lost or leaked,
+# rotate RESULT_KEY here and in the bot's .env - the balance itself is never
+# exposed by rotating.
+
+on:
+  repository_dispatch:
+    types: [balance]
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check
+        env:
+          REQ: ${{ github.event.client_payload.req }}
+          MODE: ${{ github.event.client_payload.mode }}
+          AMOUNT: ${{ github.event.client_payload.amount }}
+          BASELINE: ${{ github.event.client_payload.baseline }}
+          WAIT: ${{ github.event.client_payload.timeout }}
+          TOL: ${{ github.event.client_payload.tolerance }}
+          POLL: ${{ github.event.client_payload.poll }}
+          TOKEN: ${{ secrets.BELGI_TOKEN }}
+          KEY: ${{ secrets.RESULT_KEY }}
+        run: |
+          set -u
+          MODE="${MODE:-read}"; WAIT="${WAIT:-300}"; TOL="${TOL:-0.01}"
+          AMOUNT="${AMOUNT:-0}"; BASELINE="${BASELINE:-0}"; POLL="${POLL:-5}"
+          SERIES=""
+
+          read_balance() {
+            code=$(curl -s -o /tmp/b.bin -w "%{http_code}" -m 20 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "User-Agent: Toleg/2.11.0 (Android 11; samsung SM-A105F; okhttp/3.12.13)" \
+              -H "App-Os: Android" -H "Os-Version: 11 (R)" \
+              -H "App-Version: 2.11.0" -H "Accept-Encoding: gzip" \
+              "https://ta.belgi.com.tm/api/v3/balance?lang=tk" 2>/dev/null) || code="000"
+            [ "$code" = "200" ] || return 1
+            strings /tmp/b.bin 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+' | head -1
+          }
+
+          # The ONLY thing that leaves this job. Encrypted, so the artifact is
+          # useless to anyone without the key.
+          write_result() {   # $1=status $2=balance $3=detail
+            printf '{"req":"%s","status":"%s","balance":%s,"baseline":%s,"detail":"%s","mode":"%s","changes":"%s","at":"%s"}' \
+              "${REQ}" "$1" "${2:-null}" "${BASELINE:-0}" "$3" "${MODE}" \
+              "${SERIES:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              | openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt \
+                  -pass pass:"${KEY}" -base64 -A > result.enc
+            echo "result written ($1)"          # status word only, never a number
+          }
+
+          FIRST=""
+          for i in 1 2 3; do
+            FIRST=$(read_balance) && [ -n "$FIRST" ] && break
+            FIRST=""; sleep 2
+          done
+          if [ -z "$FIRST" ]; then
+            write_result "blocked" "null" "this runner cannot reach belgi"
+            exit 0
+          fi
+          echo "reachable: yes"
+
+          if [ "$MODE" = "read" ]; then
+            write_result "ok" "$FIRST" "balance read"
+            exit 0
+          fi
+
+          if awk -v b="$BASELINE" 'BEGIN{exit !(b<=0)}'; then
+            BASELINE="$FIRST"
+            echo "no baseline supplied; using this reading"
+          fi
+          TARGET=$(awk -v b="$BASELINE" -v a="$AMOUNT" -v t="$TOL" \
+            'BEGIN{printf "%.2f", b+a-t}')
+
+          if awk -v n="$FIRST" -v t="$TARGET" 'BEGIN{exit !(n>=t)}'; then
+            write_result "paid" "$FIRST" "already credited when the window opened"
+            exit 0
+          fi
+
+          END=$(( $(date +%s) + WAIT ))
+          LAST="$FIRST"
+          while [ "$(date +%s)" -lt "$END" ]; do
+            sleep "$POLL"
+            NOW=$(read_balance) || NOW=""
+            [ -z "$NOW" ] && continue
+            if [ "$NOW" != "$LAST" ]; then
+              STAMP=$(date -u +%H:%M:%S)
+              echo "movement detected at ${STAMP}"     # time only, no figures
+              SERIES="${SERIES}${STAMP} "
+            fi
+            LAST="$NOW"
+
+            if awk -v n="$NOW" -v b="$BASELINE" 'BEGIN{exit !(n<b)}'; then
+              echo "went down; re-basing"
+              BASELINE="$NOW"
+              TARGET=$(awk -v b="$BASELINE" -v a="$AMOUNT" -v t="$TOL" \
+                'BEGIN{printf "%.2f", b+a-t}')
+              continue
+            fi
+
+            if awk -v n="$NOW" -v t="$TARGET" 'BEGIN{exit !(n>=t)}'; then
+              write_result "paid" "$NOW" "expected amount arrived"
+              exit 0
+            fi
+          done
+          write_result "timeout" "$LAST" "no matching payment within ${WAIT}s"
+
+      - name: Publish result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: res-${{ github.event.client_payload.req }}
+          path: result.enc
+          retention-days: 1
+          if-no-files-found: warn
