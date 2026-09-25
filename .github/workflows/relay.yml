@@ -23,19 +23,31 @@ jobs:
     steps:
       - name: Check
         env:
+          # Only these two are in the clear. REQ is a random id; P is the
+          # sealed request. GitHub prints this env block in the log, which is
+          # exactly why the baseline may not travel as a plain value.
           REQ: ${{ github.event.client_payload.req }}
-          MODE: ${{ github.event.client_payload.mode }}
-          AMOUNT: ${{ github.event.client_payload.amount }}
-          BASELINE: ${{ github.event.client_payload.baseline }}
-          WAIT: ${{ github.event.client_payload.timeout }}
-          TOL: ${{ github.event.client_payload.tolerance }}
-          POLL: ${{ github.event.client_payload.poll }}
+          P: ${{ github.event.client_payload.p }}
           TOKEN: ${{ secrets.BELGI_TOKEN }}
           KEY: ${{ secrets.RESULT_KEY }}
         run: |
           set -u
-          MODE="${MODE:-read}"; WAIT="${WAIT:-300}"; TOL="${TOL:-0.01}"
-          AMOUNT="${AMOUNT:-0}"; BASELINE="${BASELINE:-0}"; POLL="${POLL:-5}"
+          # Unseal the request. Nothing from it is ever echoed.
+          REQUEST=$(printf '%s' "${P}" | openssl enc -d -aes-256-cbc -pbkdf2 \
+            -iter 100000 -base64 -A -pass pass:"${KEY}" 2>/dev/null) || REQUEST=""
+          if [ -z "$REQUEST" ]; then
+            echo "could not read the request"
+            exit 1
+          fi
+          field() { printf '%s' "$REQUEST" | python3 -c \
+            "import json,sys; print(json.load(sys.stdin).get('$1',''))"; }
+
+          MODE=$(field mode);      MODE="${MODE:-read}"
+          WAIT=$(field timeout);   WAIT="${WAIT:-300}"
+          TOL=$(field tolerance);  TOL="${TOL:-0.01}"
+          AMOUNT=$(field amount);  AMOUNT="${AMOUNT:-0}"
+          BASELINE=$(field baseline); BASELINE="${BASELINE:-0}"
+          POLL=$(field poll);      POLL="${POLL:-5}"
           SERIES=""
 
           read_balance() {
