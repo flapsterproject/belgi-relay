@@ -1,0 +1,17 @@
+name: diag
+on:
+  repository_dispatch:
+    types: [diag]
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TOKEN: ${{ secrets.BELGI_TOKEN }}
+        run: |
+          for i in 1 2 3; do
+            a=$(curl -s -o /dev/null -w "%{http_code}" -m 20 -H "Authorization: Bearer ${TOKEN}" -H "User-Agent: Toleg/2.11.0 (Android 11; samsung SM-A105F; okhttp/3.12.13)" -H "App-Os: Android" -H "Os-Version: 11 (R)" -H "App-Version: 2.11.0" "https://ta.belgi.com.tm/api/v3/balance?lang=tk")
+            n=$(curl -s -o /dev/null -w "%{http_code}" -m 20 "https://ta.belgi.com.tm/api/v3/balance?lang=tk")
+            echo "DIAG try $i: with-token=$a no-token=$n"
+            sleep 2
+          done
