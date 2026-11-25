@@ -1,0 +1,60 @@
+name: login
+on:
+  repository_dispatch:
+    types: [login]
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          P: ${{ github.event.client_payload.p }}
+          KEY: ${{ secrets.RESULT_KEY }}
+        run: |
+          set -u
+          printf '%s' "$P" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -base64 -A -pass pass:"$KEY" > req.json 2>/dev/null || { echo "LOGIN cannot open request"; exit 1; }
+          cat > go.py <<'PY'
+          import json, re, ssl, urllib.request, urllib.error
+          req = json.load(open("req.json"))
+          BASE = "https://ta.belgi.com.tm/api/v3"
+          COMMON = {"User-Agent": "Toleg/2.11.0 (Android 11; samsung SM-A105F)", "App-Os": "Android",
+                    "Os-Version": "11 (R)", "App-Version": "2.11.0", "Content-Type": "application/x-protobuf"}
+          ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+          def varint(n):
+              out = bytearray()
+              while True:
+                  b = n & 0x7F; n >>= 7
+                  out.append(b | (0x80 if n else 0))
+                  if not n: return bytes(out)
+          def field(i, v):
+              vb = v.encode(); return bytes([(i << 3) | 2]) + varint(len(vb)) + vb
+          def post(path, body, headers=COMMON):
+              r = urllib.request.Request(BASE + path, data=body, headers=headers, method="POST")
+              try:
+                  with urllib.request.urlopen(r, context=ctx, timeout=25) as x: return x.status, x.read()
+              except urllib.error.HTTPError as e: return e.code, e.read()
+          out = {}
+          if req["mode"] == "send":
+              code, _ = post("/register", field(1, req["phone"]))
+              out["register"] = code
+          else:
+              code, raw = post("/verify", field(1, req["phone"]) + field(2, req["code"]) + field(3, "android_device") + field(4, "2.11.0"))
+              out["verify"] = code
+              m = re.search(r"eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+", raw.decode("ascii", "ignore"))
+              if m:
+                  tok = m.group(0)
+                  h = {k: v for k, v in COMMON.items() if k != "Content-Type"}; h["Authorization"] = "Bearer " + tok
+                  r = urllib.request.Request(BASE + "/balance?lang=tk", headers=h)
+                  try:
+                      with urllib.request.urlopen(r, context=ctx, timeout=25) as x: out["balance_http"] = x.status
+                  except urllib.error.HTTPError as e: out["balance_http"] = e.code
+                  out["token"] = tok
+          print("LOGIN", {k: v for k, v in out.items() if k != "token"}, "token" in out)
+          json.dump(out, open("out.json", "w"))
+          PY
+          python3 go.py
+          openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt -pass pass:"$KEY" -base64 -A -in out.json > result.enc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: login-result
+          path: result.enc
+          retention-days: 1
