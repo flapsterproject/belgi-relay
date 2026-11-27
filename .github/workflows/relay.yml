@@ -47,7 +47,7 @@ jobs:
           TOL=$(field tolerance);  TOL="${TOL:-0.01}"
           AMOUNT=$(field amount);  AMOUNT="${AMOUNT:-0}"
           BASELINE=$(field baseline); BASELINE="${BASELINE:-0}"
-          POLL=$(field poll);      POLL="${POLL:-5}"
+          POLL=$(field poll);      POLL="${POLL:-20}"
           SERIES=""
 
           read_balance() {
@@ -57,6 +57,7 @@ jobs:
               -H "App-Os: Android" -H "Os-Version: 11 (R)" \
               -H "App-Version: 2.11.0" -H "Accept-Encoding: gzip" \
               "https://ta.belgi.com.tm/api/v3/balance?lang=tk" 2>/dev/null) || code="000"
+            echo "$code" > /tmp/code
             [ "$code" = "200" ] || return 1
             strings /tmp/b.bin 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+' | head -1
           }
@@ -75,8 +76,15 @@ jobs:
           FIRST=""
           for i in 1 2 3; do
             FIRST=$(read_balance) && [ -n "$FIRST" ] && break
-            FIRST=""; sleep 2
+            FIRST=""
+            # 429 = belgi rate-limits the token; more reads only extend it
+            [ "$(cat /tmp/code 2>/dev/null)" = "429" ] && break
+            sleep 2
           done
+          if [ -z "$FIRST" ] && [ "$(cat /tmp/code 2>/dev/null)" = "429" ]; then
+            write_result "limited" "null" "belgi says too many requests"
+            exit 0
+          fi
           if [ -z "$FIRST" ]; then
             write_result "blocked" "null" "this runner cannot reach belgi"
             exit 0
@@ -105,6 +113,9 @@ jobs:
           while [ "$(date +%s)" -lt "$END" ]; do
             sleep "$POLL"
             NOW=$(read_balance) || NOW=""
+            if [ -z "$NOW" ] && [ "$(cat /tmp/code 2>/dev/null)" = "429" ]; then
+              sleep 60
+            fi
             [ -z "$NOW" ] && continue
             if [ "$NOW" != "$LAST" ]; then
               STAMP=$(date -u +%H:%M:%S)
